@@ -1,0 +1,379 @@
+---
+title: "Group Project: Group 5 Mesothelioma"
+author: "Samantha Freund"
+date: "11/24/2019"
+output:
+  word_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+Notes: 
+  - You do not have to put all of your team members' code into a single file. I have included all 5 analyses just for your information. You only need the code for your analysis.
+  - The tasks include both coding and written interpretation. 
+  - Please knit to word document -- it will make it easier to combine your results with your team members in to the single manuscript (submitted in GP4).
+
+## Setup
+
+### Load packages
+
+```{r setup, include=FALSE}
+### Global knitr options
+knitr::opts_chunk$set(echo = TRUE)
+
+### Load packages/libraries that we will need
+library(tidyverse)
+library(viridis)       # Better plot colors
+library(ggbiplot)      # PCA plot
+library(corrr)         # Correlations
+library(ggridges)      # Density ridge plot
+library(ggpubr)        # Fancy plots
+library(psych)         # Distributions
+```
+
+### Custom ggplot theme
+
+```{r theme}
+### DON'T EDIT CODE IN THIS CHUNK
+
+theme_custom <- theme_bw() +
+  
+  # if we have a plot title or subtitle, let's center it
+  theme (
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  ) 
+theme_set(theme_custom)
+
+### We'll make the viridis color scale our default plotting color palette
+scale_colour_continuous <- function(...) {
+  scale_colour_viridis_c(...)
+}
+scale_fill_continuous <- function(...) {
+  scale_fill_viridis_c(...)
+}
+scale_colour_discrete <- function(...) {
+  scale_colour_viridis_d(..., begin = 0, end = 0.9)
+}
+scale_fill_discrete <- function(...) {
+  scale_fill_viridis_d(..., begin = 0, end = 0.9)
+}
+```
+
+### Setwd fix (if needed)
+
+If you are having trouble loading the exprs_tidy file below, manually override the working directory. To do this
+  1. In the menu bar, click: Session > Set Working Directory > To Source File Location
+  2. Copy the line of code in the console, and paste it into the code chunk below
+  
+```{r fix_setwd}
+### EDIT if necessary
+setwd("~/Documents/BIFS 613")
+```
+
+### FYI: how I got the data
+
+```{r get_data, eval=FALSE}
+### Get list of available datasets
+### https://www.bioconductor.org/packages/3.3/bioc/vignettes/TCGAbiolinks/inst/doc/tcgaBiolinks.html#harmonized-data-1
+View(getGDCprojects())
+
+### Datasets to use for group project (I picked the ones with smallest sample size and no sex bias)
+projects <- c(
+  "TCGA-ACC",
+  "TCGA-CHOL", 
+  "TCGA-DLBC", 
+  "TCGA-KICH", 
+  "TCGA-MESO", 
+  "TCGA-UVM"
+)
+
+phenoList <-  vector(mode = "list", length = length(projects))
+names(phenoList) <- projects
+exprsList <-  vector(mode = "list", length = length(projects))
+names(exprsList) <- projects
+for (i in projects) { 
+  ### Get data (in summarized experiment ["se"]  format)
+  query <- GDCquery(
+    project = i, 
+    data.category = "Transcriptome Profiling", 
+    data.type = "Gene Expression Quantification", 
+    workflow.type = "HTSeq - FPKM"
+  )
+  GDCdownload(query)
+  se <- GDCprepare(query)
+  
+  ### Extract phenoData and remove columns that either are all different or all consistent
+  pheno_full <- as.data.frame(colData(se))
+  pheno <- janitor::remove_constant(pheno_full)
+  
+  ### Extract exprs matrix and remove lowly expressed
+  exprs_full <- assay(se)
+  keep <- rowSums(exprs_full > 1) >= 10
+  exprs <- exprs_full[keep, ]
+
+  ### Shorten the sample id
+  rownames(pheno) <- abbreviate(gsub("TCGA-OR-", "", rownames(pheno)), method = "both")
+  pheno$id <- rownames(pheno)
+  colnames(exprs) <- abbreviate(gsub("TCGA-OR-", "", colnames(exprs)), method = "both")
+  
+  ### Remove extra columns (not groups)
+  pheno$sample <- pheno$id
+  pheno$id <- NULL
+  remove_cols <- c(
+    "patient", "updated_datetime", "updated_datetime.x", "updated_datetime.y", 
+    "barcode", "diagnosis_id", "demographic_id", "exposure_id", "bcr_patient_barcode", 
+    "morphology", "treatments", 
+    "days_to_birth", "days_to_last_follow_up", "days_to_death",
+    "year_of_birth", "year_of_diagnosis", "year_of_death"
+  )
+  pheno <- pheno[ , !(colnames(pheno) %in% remove_cols)]
+  pheno <- pheno[ , !(colnames(pheno) %in% colnames(pheno)[grep("_CHOL_del|_CHOL_amp|subtype_", colnames(pheno))])]
+
+  ### Save
+  saveRDS(exprs, paste0(i, "_exprs.rds"))
+  saveRDS(pheno, paste0(i, "_pheno.rds"))
+  
+  ### Add to list
+  exprsList[[i]]  <- exprs
+  phenoList[[i]] <- pheno
+  
+  ### Clean up
+  rm(exprs)
+  rm(exprs_full)
+  rm(pheno)
+  rm(pheno_full)
+  rm(keep)
+}
+
+### Save
+saveRDS(exprsList, "all_exprs.rds")
+saveRDS(phenoList, "all_pheno.rds")
+
+### Look at
+sapply(exprsList, dim)
+sapply(phenoList, dim)
+sapply(phenoList, names)
+
+### Write out names
+rbind(
+  paste("ACC:", toString(sort(names(phenoList$`TCGA-ACC`)))),
+  paste("CHOL:", toString(sort(names(phenoList$`TCGA-CHOL`)))),
+  paste("DLBC:", toString(sort(names(phenoList$`TCGA-DLBC`)))),
+  paste("KICH:", toString(sort(names(phenoList$`TCGA-KICH`)))),
+  paste("MESO:", toString(sort(names(phenoList$`TCGA-MESO`)))),
+  paste("UVM:", toString(sort(names(phenoList$`TCGA-UVM`))))
+) %>%
+  writeLines("sample_variables.txt")
+```
+
+## Pre-process data 
+
+### Load your dataset 
+
+```{r load_data}
+### EDIT: You need to insert your dataset file names in the quotes below
+#For our purposes, we're going to be looking at BAP-1 as compared to other expression - BAP-1 is ENSEMBL ENSG00000163930 - line 8766 in exprs 
+
+exprs <- readRDS("TCGA-MESO_exprs.rds")
+pheno <- readRDS("TCGA-MESO_pheno.rds")
+```
+
+### Pick your group (variable of interest)
+
+This should be a variable that is categorical with at least 2 categories and at least 3 samples in each category Use colnames(pheno) to find out what variable options you have. You can use one of the descriptive summary functions (from AE3) to determine how many categories there are for each group, and how many samples there are for each category.
+
+```{r select_group}
+### EDIT!! Copy your variable of interest into a new column called "group". This will help generalize/simplify your project's code
+pheno$group <- pheno$gender
+```
+
+### Filter samples
+
+Check for samples with missing data for your "group"
+
+```{r filter_samples_check}
+### Don't edit
+
+### You can check this using the following (many other ways to check too)
+### Make sure no "blanks" either -- 
+### sometimes missing data isn't converted to an NA but instead is just blank
+summary(as.factor(pheno$group)) # look for blanks, no data, etc. categories
+table(is.na(pheno$group))
+```
+
+Remove samples with missing data (or no data; i.e. "not reported") for your "group". First from phenoData
+
+```{r filter_samples_remove}
+### Don't edit
+
+### Remove NAs
+pheno <- pheno[!is.na(pheno$group), ]
+
+### Remove blanks
+pheno <- pheno[!(pheno$group == ""), ]
+
+### Remove "not reported"
+pheno <- pheno[!(pheno$group == "not reported"), ]
+```
+
+And also remove them from exprsData
+
+```{r}
+### Don't edit
+
+exprs <- exprs[ , which(colnames(exprs) %in% rownames(pheno))]
+```
+
+### Filter genes with low expression
+
+Here we'll require FPKM > 5 in at least 25 samples (it will help reduce computational time)
+
+```{r filter_genes}
+### Don't edit
+
+### Filter
+exprs <- exprs[rowSums(exprs > 5) > 25, ]
+```
+
+### Finalize data
+
+Match order of samples in both pheno (rownames) and exprs (colnames) datasets
+
+```{r matrices}
+### Don't edit
+
+### Match order of samples in both matrices
+table(colnames(exprs) == rownames(pheno)) # check
+pheno <- pheno[match(colnames(exprs), rownames(pheno)), ] # fixes if needed
+table(colnames(exprs) == rownames(pheno)) # check
+```
+
+Convert expression matrix to tidy, so that we also have a tidy version of the data in case we need it.
+
+```{r tidy}
+### Don't edit
+
+### Create tibble with expression and pheno data
+tidy <- exprs %>% 
+  
+  # Convert expression matrix to tidy tibble
+  as_tibble(rownames = "gene") %>%
+  gather("sample", "fpkm", -gene)  %>%
+
+  # Add phenoData
+  inner_join(pheno, by = "sample")
+```
+
+## Team Member #2: Distribution
+
+Biological question: BAP-1 (ENSEMBL ENSG00000163930) is potential target for prevention, early detection and treatment (screening tool). BAP1 increases the risk of developing mesothelioma, but also improves chances of long term survival. Hopefully want to compare and see if this gene is more highly expressed in women than men or if expression of genes related to mesothelioma is greater for women. Mostly want to compare expression as a factor of gender.
+
+### Prepare
+
+want to just focus on BAP1 gene based on literature and relevance to women diagnosed with mesothelioma and health outcomes
+
+```{r}
+### Calculate log2(FPKM)
+tidy$logFPKM <- log2(tidy$fpkm + 0.00001) # add small value to prevent the "-Inf" caused by log2(0)
+
+### Filtering data so only focusing on BAP1 gene
+BAP1 <- tidy %>%
+  filter(gene == "ENSG00000163930")
+```
+
+###  a. Generate histogram, frequency plot, density plot, and density ridge plot of expression values for each category in your group of interest
+
+Histogram
+
+```{r}
+### Histogram for Expression of BAP1 as factor of gender
+BAP1 %>%
+  ggplot(aes(x = logFPKM,  color = group, fill = group)) +
+  geom_histogram(alpha = 0.2)
+ggsave("histogram.png")
+```
+
+Frequency plot
+
+```{r}
+### Frequency plot
+BAP1 %>%
+  ggplot(aes(x = logFPKM,  color = group, fill = group)) +
+  geom_freqpoly()
+```
+
+Standard density plot
+
+```{r}
+### Standard density plot
+BAP1 %>%
+  ggplot(aes(x = logFPKM,  color = group, fill = group)) +
+  geom_density(alpha = 0.1)
+```
+
+Density ridges plot with mean and median
+
+```{r}
+#d Indicate the mean and median in the figure, for each category in your group of interest
+### Adding mean and median to our ridges plot
+BAP1 %>%
+  ggplot(aes(x = logFPKM,  y = group, color = group, fill = group)) + xlab("Expression (fpkm)") +
+  ggridges::geom_density_ridges(alpha = 0.2, show.legend = FALSE) + 
+
+  # Adding mean as line
+  ggpubr::stat_central_tendency(
+    type = "mean", 
+    geom = "line",
+    show.legend = FALSE
+  ) +
+
+  # Adding median as triangle at bottom
+  ggpubr::stat_central_tendency(
+    type = "median", 
+    geom = "point", size = 5, shape = 17, 
+    show.legend = FALSE
+  ) 
+```
+
+###  b. Decide which best illustrates your distributions
+
+The density plot with means and medians best represents our data. It shows a more explicit comparison of expression of the BAP-1 gene for male v. females affected by mesothelioma. 
+
+###  c. Generate a final distribution figure to include in the manuscript
+
+(see density plot)
+
+###  d. Indicate the mean and median in the figure, for each category in your group of interest
+mean for male expression of BAP1: 3.183152
+mean for female expression of BAP1: 3.358919
+median for male: 3.596328
+median for female: 3.536472
+
+###  e. Determine distribution shapes (skewedness, kurtosis)
+
+Add intepretation of the results below to the results section. 
+
+```{r dist_shape}
+#e Determine distribution shapes (skewedness, kurtosis)
+### Need to Create table where each sample is its own column
+### Normality: Skewed/Kurtosis-peaked-vs-normal-distribution
+shapes <- lapply(unique(BAP1$group), function (x) {
+  describe(BAP1$logFPKM[BAP1$group == x])
+}) 
+cbind.data.frame("group" = unique(BAP1$group), bind_rows(shapes))
+```
+Methods
+
+For the distribution analysis, I ran all of the following code on macOS Sierra 10.12.6 using R version 3.6.1. The tools that are necessary for this analysis include ggplot, tibble, devtools, and others as seen in session info below. Due to the relevance of BAP-1 gene for diagnosis and prognosis of mesothelioma, we decided to filter the larger dataset and transform the data in order to focus on the expression values seen in male v. female patients. 
+
+Results
+
+Based on the results for distribution, it appears that there is no significant difference between expression of BAP-1 in male v. female mesothelioma patients. This data should be analyzed to correctly fail to reject or reject our null hypothesis that there is a significant difference in expression of the BAP-1 gene based on our selected group: gender. The figure that best represents these results is the density plot with lines and triangles presented to represent the mean and median values of our data (Figure 1). Also, in examing normality, we found that the data is skewed to the left for both male and female patients. The kurtosis values are also negative which means that the outliers of our data are less extreme than expected had the data been from a normal distribution. 
+
+## Session info
+
+```{r sessioninfo}
+sessionInfo()
+```
